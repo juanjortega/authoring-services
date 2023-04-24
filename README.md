@@ -39,3 +39,16 @@ The default username and password (user:password) can be changed using the _secu
 
 ### Setup Guide
 See the [setup guide](docs/setup-guide.md) for more information.
+
+### Docker
+
+docker build -t authoring-services .
+
+### Run
+
+docker run -p 8081:8081 authoring-services
+
+### web page http://localhost:8081/authoring-services.
+
+### can change api url on docker-compose.yml
+
