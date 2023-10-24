@@ -1,2 +1,30 @@
-environment:
-  SERVER_SERVLET_CONTEXT_PATH: /my-api-url
+version: '3'
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    depends_on:
+      - db
+    environment:
+      - SERVER_PORT=8081
+      - SERVER_SERVLET_CONTEXT_PATH=/authoring-services
+      - SPRING_SECURITY_USER_NAME=user
+      - SPRING_SECURITY_USER_PASSWORD=password
+      # Agrega otras variables de entorno según sea necesario
+
+  db:
+    image: mysql:5.7
+    container_name: mysql-authoring
+    environment:
+      MYSQL_ROOT_PASSWORD: yourpassword
+      MYSQL_DATABASE: yourdatabase
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+volumes:
+  mysql-data:
