@@ -1,0 +1,15 @@
+FROM maven:3.8.5-openjdk-17
+
+# Establece el directorio de trabajo en /app
+WORKDIR /app
+
+# Copia el archivo pom.xml y los archivos fuente a /app
+COPY pom.xml .
+COPY src ./src
+
+# Compila la aplicación con Maven y omite los tests
+RUN mvn clean package -DskipTests
+
+# Ejecuta la aplicación Java
+RUN chmod 777 -R target
+CMD ["java", "-Xmx1g", "-jar", "/app/target/authoring-services-8.1.0.jar"]
