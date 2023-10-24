@@ -13,14 +13,15 @@ services:
       - SERVER_SERVLET_CONTEXT_PATH=/authoring-services
       - SPRING_SECURITY_USER_NAME=user
       - SPRING_SECURITY_USER_PASSWORD=password
-      # Agrega otras variables de entorno según sea necesario
-
+  
   db:
     image: mysql:5.7
     container_name: mysql-authoring
     environment:
-      MYSQL_ROOT_PASSWORD: yourpassword
-      MYSQL_DATABASE: yourdatabase
+      MYSQL_ROOT_PASSWORD: yourrootpassword
+      MYSQL_DATABASE: ts_review
+      MYSQL_USER: dbuser               # Nombre de usuario de la base de datos
+      MYSQL_PASSWORD: dbuserpassword   # Contraseña del usuario de la base de datos
     ports:
       - "3306:3306"
     volumes:
