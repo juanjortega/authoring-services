@@ -15,7 +15,7 @@ services:
       - SPRING_SECURITY_USER_PASSWORD=password
   
   db:
-    image: mysql:5.7
+    image: mysql:8.0
     container_name: mysql-authoring
     environment:
       MYSQL_ROOT_PASSWORD: yourrootpassword
