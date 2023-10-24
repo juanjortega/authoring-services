@@ -1,7 +1,9 @@
 package org.ihtsdo.authoringservices.service;
 
 import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.services.s3.model.*;
+import com.amazonaws.services.s3.model.CannedAccessControlList;
+import com.amazonaws.services.s3.model.PutObjectRequest;
+import com.amazonaws.services.s3.model.S3ObjectInputStream;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
@@ -59,6 +61,8 @@ public class ValidationService {
 	public static final String RUN_ID = "runId";
 	public static final String PROJECT_KEY = "projectKey";
 	public static final String TASK_KEY = "taskKey";
+	public static final String VALIDATION_START_TIMESTAMP = "startTimestamp";
+	public static final String VALIDATION_END_TIMESTAMP = "endTimestamp";
 
 	public static final String VALIDATION_RESPONSE_QUEUE = "termserver-release-validation.response";
 	public static final String ASSERTION_GROUP_NAMES = "assertionGroupNames";
@@ -70,7 +74,9 @@ public class ValidationService {
 	public static final String PREVIOUS_PACKAGE = "previousPackage";
 	public static final String DEPENDENCY_PACKAGE = "dependencyPackage";
 	public static final String DEFAULT_MODULE_ID = "defaultModuleId";
+	public static final String EXPECTED_EXTENSION_MODULES = "expectedExtensionModules";
 	public static final String INTERNATIONAL = "international";
+	public static final String MAX_FAILURE_EXPORT = "failureExportMax";
 
 	@Value("${aws.resources.enabled}")
 	private boolean awsResourceEnabled;
@@ -132,32 +138,32 @@ public class ValidationService {
 		validationLoadingCache = CacheBuilder.newBuilder()
 				.maximumSize(10000)
 				.build(
-						new CacheLoader<String, Validation>() {
-							public Validation load(String path) throws Exception {
-								return getValidationStatusesWithoutCache(Collections.singletonList(path)).get(path);
-							}
+                        new CacheLoader<>() {
+                            public Validation load(String path) throws Exception {
+                                return getValidationStatusesWithoutCache(Collections.singletonList(path)).get(path);
+                            }
 
-							@Override
-							public Map<String, Validation> loadAll(Iterable<? extends String> paths) throws Exception {
-								final ImmutableMap.Builder<String, Validation> map = ImmutableMap.builder();
-								List<String> pathsToLoad = new ArrayList<>();
-								for (String path : paths) {
-									final Validation validation = validationLoadingCache.getIfPresent(path);
-									if (validation != null) {
-										map.put(path, validation);
-									} else {
-										pathsToLoad.add(path);
-									}
-								}
-								if (!pathsToLoad.isEmpty()) {
-									final Map<String, Validation> validationMap= getValidationStatusesWithoutCache(pathsToLoad);
-									if (validationMap != null) {
-										map.putAll(validationMap);
-									}
-								}
-								return map.build();
-							}
-						});
+                            @Override
+                            public Map<String, Validation> loadAll(Iterable<? extends String> paths) throws Exception {
+                                final ImmutableMap.Builder<String, Validation> map = ImmutableMap.builder();
+                                List<String> pathsToLoad = new ArrayList<>();
+                                for (String path : paths) {
+                                    final Validation validation = validationLoadingCache.getIfPresent(path);
+                                    if (validation != null) {
+                                        map.put(path, validation);
+                                    } else {
+                                        pathsToLoad.add(path);
+                                    }
+                                }
+                                if (!pathsToLoad.isEmpty()) {
+                                    final Map<String, Validation> validationMap = getValidationStatusesWithoutCache(pathsToLoad);
+                                    if (validationMap != null) {
+                                        map.putAll(validationMap);
+                                    }
+                                }
+                                return map.build();
+                            }
+                        });
 		this.technicalItems = new HashSet<>();
 		if (this.awsResourceEnabled) {
 		 	S3ClientImpl s3Client = new S3ClientImpl(new BasicAWSCredentials(accessKey, secretKey));
@@ -200,6 +206,12 @@ public class ValidationService {
 		}
 		if (newPropertyValues.containsKey(TASK_KEY)) {
 			validation.setTaskKey(newPropertyValues.get(TASK_KEY));
+		}
+		if (newPropertyValues.containsKey(VALIDATION_START_TIMESTAMP)) {
+			validation.setStartTimestamp(newPropertyValues.get(VALIDATION_START_TIMESTAMP) != null ? Long.valueOf(newPropertyValues.get(VALIDATION_START_TIMESTAMP)) : null);
+		}
+		if (newPropertyValues.containsKey(VALIDATION_END_TIMESTAMP)) {
+			validation.setEndTimestamp(newPropertyValues.get(VALIDATION_END_TIMESTAMP) != null ? Long.valueOf(newPropertyValues.get(VALIDATION_END_TIMESTAMP)) : null);
 		}
 
 		validation = validationRepository.save(validation);
@@ -247,6 +259,9 @@ public class ValidationService {
 			newPropertyValues.put(VALIDATION_STATUS, ValidationJobStatus.SCHEDULED.name());
 			newPropertyValues.put(PROJECT_KEY, projectKey);
 			newPropertyValues.put(TASK_KEY, taskKey);
+			newPropertyValues.put(VALIDATION_START_TIMESTAMP, String.valueOf((new Date()).getTime()));
+			newPropertyValues.put(VALIDATION_END_TIMESTAMP, null);
+
 			updateValidationCache(branchPath, newPropertyValues);
 
 			return new Status(ValidationJobStatus.SCHEDULED.name());
@@ -262,10 +277,26 @@ public class ValidationService {
 		validationConfig.setPreviousPackage((String) branchMetadata.get(PREVIOUS_PACKAGE));
 		validationConfig.setDependencyPackage((String) branchMetadata.get(DEPENDENCY_PACKAGE));
 		validationConfig.setPreviousRelease((String) branchMetadata.get(PREVIOUS_RELEASE));
-		validationConfig.setIncludedModuleIds((String) branchMetadata.get(DEFAULT_MODULE_ID));
+
+		Set<String> moduleIds = new HashSet<>();
+		if (branchMetadata.containsKey(DEFAULT_MODULE_ID)) {
+			String defaultModuleId = (String) branchMetadata.get(DEFAULT_MODULE_ID);
+			moduleIds.add(defaultModuleId);
+			validationConfig.setDefaultModuleId(defaultModuleId);
+		}
+		if (branchMetadata.containsKey(EXPECTED_EXTENSION_MODULES)) {
+			moduleIds.addAll((ArrayList<String>) branchMetadata.get(EXPECTED_EXTENSION_MODULES));
+		}
+		if (!moduleIds.isEmpty()) {
+			validationConfig.setIncludedModuleIds(String.join(",", moduleIds));
+		}
+		if (branchMetadata.containsKey(MAX_FAILURE_EXPORT)) {
+			validationConfig.setFailureExportMax((String) branchMetadata.get(MAX_FAILURE_EXPORT));
+		}
+
 		validationConfig.setEnableMRCMValidation(enableMRCM);
 		validationConfig.setEnableTraceabilityValidation(!"true".equalsIgnoreCase((String) branchMetadata.get(DISABLE_TRACEABILITY_VALIDATION)));
-		validationConfig.setEnableDroolsValidation("true".equalsIgnoreCase((String) branchMetadata.get(ENABLE_DROOLS_VALIDATION)));
+		validationConfig.setEnableDroolsValidation(branchMetadata.get(ENABLE_DROOLS_VALIDATION) == null || "true".equalsIgnoreCase((String) branchMetadata.get(ENABLE_DROOLS_VALIDATION)));
 		String dependencyRelease = (String) branchMetadata.get(DEPENDENCY_RELEASE);
 		if (dependencyRelease != null) {
 			validationConfig.setReleaseCenter((String) branchMetadata.get(SHORT_NAME));
@@ -303,6 +334,14 @@ public class ValidationService {
 			//Only return the validation json if the validation is complete
 			Validation validation = getValidation(path);
 			JSONObject jsonObj = new JSONObject();
+			if (validation != null) {
+				if (validation.getStartTimestamp() != null) {
+					jsonObj.put("startTimestamp", validation.getStartTimestamp());
+				}
+				if (validation.getEndTimestamp() != null) {
+					jsonObj.put("endTimestamp", validation.getEndTimestamp());
+				}
+			}
 			if (validation != null && validation.getDailyBuildReportUrl() != null) {
 				jsonObj.put("dailyBuildRvfUrl", validation.getDailyBuildReportUrl());
 				jsonObj.put("dailyBuildReport", rvfRestTemplate.getForObject(validation.getDailyBuildReportUrl(), String.class));
@@ -429,15 +468,15 @@ public class ValidationService {
 	private Map<String, Validation> getValidationStatusesWithoutCache(List<String> paths) {
 		List<Validation> validations = validationRepository.findAllByBranchPathIn(paths);
 		Map<String, Validation> branchToValidationMap = validations.stream().collect(Collectors.toMap(Validation::getBranchPath, Function.identity()));
-		for (int i = 0; i < paths.size(); i++) {
-			Validation validation;
-			if (!branchToValidationMap.containsKey(paths.get(i))) {
-				validation = new Validation(paths.get(i));
-				validation.setStatus(ValidationJobStatus.NOT_TRIGGERED.name());
-				validation = validationRepository.save(validation);
-				branchToValidationMap.put(paths.get(i), validation);
-			}
-		}
+        for (String path : paths) {
+            Validation validation;
+            if (!branchToValidationMap.containsKey(path)) {
+                validation = new Validation(path);
+                validation.setStatus(ValidationJobStatus.NOT_TRIGGERED.name());
+                validation = validationRepository.save(validation);
+                branchToValidationMap.put(path, validation);
+            }
+        }
 
 		return branchToValidationMap;
 	}
@@ -448,7 +487,7 @@ public class ValidationService {
 	}
 
 	public void resetBranchValidationStatus(String branchPath) {
-		Map newPropertyValues = new HashMap();
+		Map<String, String> newPropertyValues = new HashMap();
 		newPropertyValues.put(VALIDATION_STATUS, ValidationJobStatus.NOT_TRIGGERED.name());
 		updateValidationCache(branchPath, newPropertyValues);
 	}

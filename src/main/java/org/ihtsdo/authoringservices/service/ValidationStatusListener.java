@@ -12,7 +12,6 @@ import org.ihtsdo.authoringservices.entity.Validation;
 import org.ihtsdo.authoringservices.repository.ValidationRepository;
 import org.ihtsdo.authoringservices.service.client.AuthoringAcceptanceGatewayClient;
 import org.ihtsdo.otf.jms.MessagingHelper;
-import org.ihtsdo.otf.rest.exception.BusinessServiceException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,6 +21,7 @@ import org.springframework.stereotype.Component;
 import javax.jms.JMSException;
 import javax.jms.TextMessage;
 
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -61,25 +61,30 @@ public class ValidationStatusListener {
 				}
 				Validation validation = validationRepository.findByRunId(runId);
 				if (validation != null) {
-					Map newPropertyValues = new HashMap();
+					Map<String, String> newPropertyValues = new HashMap<>();
 					newPropertyValues.put(ValidationService.VALIDATION_STATUS, state);
-					validationService.updateValidationCache(validation.getBranchPath(), newPropertyValues);
+
+					// Notify user
+					Notification notification = new Notification(
+							validation.getProjectKey(),
+							validation.getTaskKey(),
+							EntityType.Validation,
+							state);
+					notification.setBranchPath(validation.getBranchPath());
+					notificationService.queueNotification(
+							username,
+							notification);
+
 					if (ValidationJobStatus.COMPLETED.name().equalsIgnoreCase(state) || ValidationJobStatus.FAILED.name().equalsIgnoreCase(state)) {
-						// Notify user
-						Notification notification = new Notification(
-								validation.getProjectKey(),
-								validation.getTaskKey(),
-								EntityType.Validation,
-								state);
-						notification.setBranchPath(validation.getBranchPath());
-						notificationService.queueNotification(
-								username,
-								notification);
+						newPropertyValues.put(ValidationService.VALIDATION_END_TIMESTAMP, String.valueOf((new Date()).getTime()));
+						validationService.updateValidationCache(validation.getBranchPath(), newPropertyValues);
 
 						// Notify AAG
 						if (ValidationJobStatus.COMPLETED.name().equalsIgnoreCase(state)) {
 							aagClient.validationComplete(validation.getBranchPath(), state, validation.getReportUrl(), authenticationToken);
 						}
+					} else {
+						validationService.updateValidationCache(validation.getBranchPath(), newPropertyValues);
 					}
 				} else {
 					logger.error("Error while retrieving validation for run Id {}", runId);

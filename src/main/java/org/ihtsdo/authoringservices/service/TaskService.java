@@ -56,6 +56,7 @@ import java.util.stream.Collectors;
 
 public class TaskService {
 
+	public static final String JIRA_PROJECT_SUFFIX = "-1";
 	private static final String ENABLED_TEXT = "Enabled";
 
 	private static final String DISABLED_TEXT = "Disabled";
@@ -67,6 +68,8 @@ public class TaskService {
 			+ "\" AND status != \"" + TaskStatus.DELETED.getLabel() + "\") ";
 	private static final String AUTHORING_TASK_TYPE = "SCA Authoring Task";
 	private static final int LIMIT_UNLIMITED = -1;
+
+	private static final String SHARED = "SHARED";
 
 	@Autowired
 	private BranchService branchService;
@@ -98,6 +101,9 @@ public class TaskService {
 	@Autowired
 	private NotificationService notificationService;
 
+	@Autowired
+	private PromotionService promotionService;
+
 	@Value("${task-state-change.notification-queues}")
 	private Set<String> taskStateChangeNotificationQueues;
 
@@ -105,6 +111,7 @@ public class TaskService {
 	private final String jiraExtensionBaseField;
 	private final String jiraProductCodeField;
 	private final String jiraProjectPromotionField;
+	private final String jiraProjectLockedField;
 	private final String jiraTaskPromotionField;
 	private final String jiraProjectRebaseField;
 	private final String jiraProjectScheduledRebaseField;
@@ -136,6 +143,7 @@ public class TaskService {
 			jiraExtensionBaseField = JiraHelper.fieldIdLookup("Extension Base", jiraClientForFieldLookup, projectJiraFetchFields);
 			jiraProductCodeField = JiraHelper.fieldIdLookup("Product Code", jiraClientForFieldLookup, projectJiraFetchFields);
 			jiraProjectPromotionField = JiraHelper.fieldIdLookup("SCA Project Promotion", jiraClientForFieldLookup, projectJiraFetchFields);
+			jiraProjectLockedField = JiraHelper.fieldIdLookup("SCA Project Locked", jiraClientForFieldLookup, projectJiraFetchFields);
 			jiraTaskPromotionField = JiraHelper.fieldIdLookup("SCA Task Promotion", jiraClientForFieldLookup, projectJiraFetchFields);
 			jiraProjectRebaseField = JiraHelper.fieldIdLookup("SCA Project Rebase", jiraClientForFieldLookup, projectJiraFetchFields);
 			jiraProjectScheduledRebaseField = JiraHelper.fieldIdLookup("SCA Project Scheduled Rebase", jiraClientForFieldLookup, projectJiraFetchFields);
@@ -152,6 +160,7 @@ public class TaskService {
 			jiraExtensionBaseField = null;
 			jiraProductCodeField = null;
 			jiraProjectPromotionField = null;
+			jiraProjectLockedField = null;
 			jiraTaskPromotionField = null;
 			jiraProjectRebaseField = null;
 			jiraProjectScheduledRebaseField = null;
@@ -202,7 +211,7 @@ public class TaskService {
 		logger.info("{} task state notification queues configured {}", taskStateChangeNotificationQueues.size(), taskStateChangeNotificationQueues);
 	}
 
-	public List<AuthoringProject> listProjects(Boolean lightweight) throws JiraException, BusinessServiceException {
+	public List<AuthoringProject> listProjects(Boolean lightweight) throws JiraException {
 		final TimerUtil timer = new TimerUtil("ProjectsList");
 		List<Issue> projectTickets = new ArrayList<>();
 		// Search for authoring project tickets this user has visibility of
@@ -210,7 +219,7 @@ public class TaskService {
 
 		timer.checkpoint("First jira search");
 		for (Issue projectMagicTicket : issues) {
-			final String productCode = getProjectDetailsPopulatingCache(projectMagicTicket).getProductCode();
+			final String productCode = getProjectDetailsPopulatingCache(projectMagicTicket).productCode();
 			if (instanceConfiguration.isJiraProjectVisible(productCode)) {
 				projectTickets.add(projectMagicTicket);
 			}
@@ -250,13 +259,59 @@ public class TaskService {
 
 	public String getProjectBaseUsingCache(String projectKey) throws BusinessServiceException {
 		try {
-			return projectDetailsCache.get(projectKey).getBaseBranchPath();
+			return projectDetailsCache.get(projectKey).baseBranchPath();
 		} catch (ExecutionException e) {
 			throw new BusinessServiceException("Failed to retrieve project path.", e);
 		}
 	}
 
-	private List<AuthoringProject> buildAuthoringProjects(List<Issue> projectTickets, boolean lightweight) throws BusinessServiceException {
+	public void lockProject(String projectKey) throws BusinessServiceException {
+		Issue issue;
+		try {
+			issue = getJiraClient().getIssue(projectKey + JIRA_PROJECT_SUFFIX);
+		} catch (JiraException e) {
+			throw new BusinessServiceException("Failed to retrieve JIRA issue with key " + projectKey, e);
+		}
+		if (issue != null) {
+			try {
+				JSONObject updateObj = new JSONObject();
+				updateObj.put("value", ENABLED_TEXT);
+
+				final Issue.FluentUpdate updateRequest = issue.update();
+				updateRequest.field(jiraProjectLockedField, updateObj);
+
+				updateRequest.execute();
+			} catch (JiraException e) {
+				logger.error("Failed to update issue with key " + (projectKey + JIRA_PROJECT_SUFFIX), e);
+				throw new BusinessServiceException("Failed to update issue with key " + (projectKey + JIRA_PROJECT_SUFFIX));
+			}
+		}
+	}
+
+	public void unlockProject(String projectKey) throws BusinessServiceException {
+		Issue issue;
+		try {
+			issue = getJiraClient().getIssue(projectKey + JIRA_PROJECT_SUFFIX);
+		} catch (JiraException e) {
+			throw new BusinessServiceException("Failed to retrieve JIRA issue with key " + projectKey, e);
+		}
+		if (issue != null) {
+			try {
+				JSONObject updateObj = new JSONObject();
+				updateObj.put("value", DISABLED_TEXT);
+
+				final Issue.FluentUpdate updateRequest = issue.update();
+				updateRequest.field(jiraProjectLockedField, updateObj);
+
+				updateRequest.execute();
+			} catch (JiraException e) {
+				logger.error("Failed to update issue with key " + (projectKey + JIRA_PROJECT_SUFFIX), e);
+				throw new BusinessServiceException("Failed to update issue with key " + (projectKey + JIRA_PROJECT_SUFFIX), e);
+			}
+		}
+	}
+
+	private List<AuthoringProject> buildAuthoringProjects(List<Issue> projectTickets, boolean lightweight) {
 		if (projectTickets.isEmpty()) {
 			return new ArrayList<>();
 		}
@@ -269,13 +324,13 @@ public class TaskService {
 		SecurityContext securityContext = SecurityContextHolder.getContext();
 
 		JiraClient jiraClient = getJiraClient();
-		Future<Map<String, JiraProject>> unfilteredProjects = executorService.submit(() -> getProjects(jiraClient.getRestClient()).stream().collect(Collectors.toMap(JiraProject::getKey, Function.identity())));
+		Future<Map<String, JiraProject>> unfilteredProjects = executorService.submit(() -> getProjects(jiraClient.getRestClient()).stream().collect(Collectors.toMap(JiraProject::key, Function.identity())));
 
 		projectTickets.parallelStream().forEach(projectTicket -> {
 			SecurityContextHolder.setContext(securityContext);
 			try {
 				final String projectKey = projectTicket.getProject().getKey();
-				final String extensionBase = getProjectDetailsPopulatingCache(projectTicket).getBaseBranchPath();
+				final String extensionBase = getProjectDetailsPopulatingCache(projectTicket).baseBranchPath();
 				final String branchPath = PathHelper.getProjectPath(extensionBase, projectKey);
 				
 				String latestClassificationJson = null;
@@ -284,6 +339,7 @@ public class TaskService {
 				}
 				
 				final boolean promotionDisabled = DISABLED_TEXT.equals(JiraHelper.toStringOrNull(projectTicket.getField(jiraProjectPromotionField)));
+				final boolean projectLocked = !DISABLED_TEXT.equals(JiraHelper.toStringOrNull(projectTicket.getField(jiraProjectLockedField)));
 				final boolean taskPromotionDisabled = DISABLED_TEXT.equals(JiraHelper.toStringOrNull(projectTicket.getField(jiraTaskPromotionField)));
 				final boolean rebaseDisabled = DISABLED_TEXT.equals(JiraHelper.toStringOrNull(projectTicket.getField(jiraProjectRebaseField)));
 				final boolean scheduledRebaseDisabled = DISABLED_TEXT.equals(JiraHelper.toStringOrNull(projectTicket.getField(jiraProjectScheduledRebaseField)));
@@ -327,8 +383,8 @@ public class TaskService {
 				}
 				Map<String, JiraProject> projectMap = unfilteredProjects.get();
 				JiraProject project = projectMap.get(projectKey);
-				final AuthoringProject authoringProject = new AuthoringProject(projectKey, project.getName(),
-						project.getLead(), branchPath, branchState, baseTimeStamp, headTimeStamp, latestClassificationJson, promotionDisabled, mrcmDisabled, templatesDisabled, spellCheckDisabled, rebaseDisabled, scheduledRebaseDisabled, taskPromotionDisabled);
+				final AuthoringProject authoringProject = new AuthoringProject(projectKey, project.name(),
+						project.lead(), branchPath, branchState, baseTimeStamp, headTimeStamp, latestClassificationJson, promotionDisabled, mrcmDisabled, templatesDisabled, spellCheckDisabled, rebaseDisabled, scheduledRebaseDisabled, taskPromotionDisabled, projectLocked);
 				authoringProject.setMetadata(metadata);
 				authoringProject.setCodeSystem(codeSystem);
 				synchronized (authoringProjects) {
@@ -612,6 +668,9 @@ public class TaskService {
 		final TimerUtil timer = new TimerUtil("BuildTaskList", Level.DEBUG);
 		final String username = getUsername();
 		List<AuthoringTask> allTasks = new ArrayList<>();
+		final SnowstormRestClient snowstormRestClient = snowstormRestClientFactory.getClient();
+		List<CodeSystem> codeSystems = snowstormRestClient.getCodeSystems();
+		Map<String, Long> codeSystemBaseTimestampMap = new HashMap<>();
 		try {
 			// Map of task paths to tasks
 			Map<String, AuthoringTask> startedTasks = new HashMap<>();
@@ -624,10 +683,48 @@ public class TaskService {
 			final Map<String, ProjectDetails> projectKeyToBranchBaseMap = projectDetailsCache.getAll(projectKeys);
 			for (Issue issue : tasks) {
 				final ProjectDetails projectDetails = projectKeyToBranchBaseMap.get(issue.getProject().getKey());
-				if (instanceConfiguration.isJiraProjectVisible(projectDetails.getProductCode())) {
-					AuthoringTask task = new AuthoringTask(issue, projectDetails.getBaseBranchPath());
+				if (instanceConfiguration.isJiraProjectVisible(projectDetails.productCode())) {
+					AuthoringTask task = new AuthoringTask(issue, projectDetails.baseBranchPath());
+
+					ProcessStatus autoPromotionStatus = promotionService.getAutomateTaskPromotionStatus(task.getProjectKey(), task.getKey());
+					if (autoPromotionStatus != null) {
+						switch (autoPromotionStatus.getStatus()) {
+							case "Queued":
+								task.setStatus(TaskStatus.AUTO_QUEUED);
+								break;
+							case "Rebasing":
+								task.setStatus(TaskStatus.AUTO_REBASING);
+								break;
+							case "Classifying":
+								task.setStatus(TaskStatus.AUTO_CLASSIFYING);
+								break;
+							case "Promoting":
+								task.setStatus(TaskStatus.AUTO_PROMOTING);
+								break;
+							case "Rebased with conflicts":
+							case "Classified with results":
+								task.setStatus(TaskStatus.AUTO_CONFLICT);
+								break;
+						}
+					}
 
 					allTasks.add(task);
+
+					// Fetch latest code system version timestamp
+					if (lightweight == null || !lightweight) {
+						final String projectPath = PathHelper.getProjectPath(projectDetails.baseBranchPath(), issue.getProject().getKey());
+						String projectParentPath = PathHelper.getParentPath(projectPath);
+						CodeSystem codeSystem = codeSystems.stream().filter(c -> projectParentPath.equals(c.getBranchPath())).findFirst().orElse(null);
+						if (codeSystem == null && projectParentPath.contains("/")) {
+							// Attempt match using branch grandfather
+							String grandfatherPath = PathHelper.getParentPath(projectParentPath);
+							codeSystem = codeSystems.stream().filter(c -> grandfatherPath.equals(c.getBranchPath())).findFirst().orElse(null);
+						}
+						if (codeSystem != null && codeSystem.getLatestVersion() != null) {
+							task.setLatestCodeSystemVersionTimestamp(codeSystem.getLatestVersion().getImportDate().getTime());
+						}
+					}
+
 					// Fetch the extra statuses for tasks that are not new and have a branch
 					if (task.getStatus() != TaskStatus.NEW) {
 						Branch branch = branchService.getBranchOrNull(task.getBranchPath());
@@ -843,58 +940,59 @@ public class TaskService {
 	}
 
 	public AuthoringProject updateProject(String projectKey, AuthoringProject updatedProject) throws BusinessServiceException {
-		try {
-			List<Issue> issues = Collections.singletonList(getProjectTicketOrThrow(projectKey));
-			if (issues.size() == 0) {
-				throw new BusinessServiceException ("Failed to recover project: " + projectKey);
-			}
-			Issue project = issues.get(0);
-			
-			
-			// For some reason, it's not possible to update some custom fields in type of 
-			// - Radio button
-			// - Checkbox
-			// - Select List
-			// by using Jira Client. So we have to use REST api to update those fields manually.
-			final Boolean projectScheduledRebaseDisabled = updatedProject.isProjectScheduledRebaseDisabled();
-			if (projectScheduledRebaseDisabled != null) {
-				JSONObject obj = (JSONObject) project.getField(jiraProjectScheduledRebaseField);
-				String oldVal = obj.getString("value");
-				boolean changed = (oldVal.equals(ENABLED_TEXT) && projectScheduledRebaseDisabled) || (oldVal.equals(DISABLED_TEXT) && !projectScheduledRebaseDisabled);
-				if (changed) {
-					/*if(!project.getReporter().getName().equals(getUsername())) {
-						throw new BusinessServiceException ("No permisson to turn on/off automatic rebase.");
-					}*/
-					
-					JSONObject updateObj = new JSONObject();
-					updateObj.put("value", projectScheduledRebaseDisabled ? DISABLED_TEXT : ENABLED_TEXT);
-					
-					JSONObject fieldmap = new JSONObject();
-					fieldmap.put(jiraProjectScheduledRebaseField, updateObj);
-					
-					JSONObject req = new JSONObject();
-					req.put("fields", fieldmap);
-					try {
-						RestClient restclient = getJiraClient().getRestClient();
-						URI uri = new URI(project.getSelf());
-						restclient.put(uri, req);
-					} catch (RestException | IOException | URISyntaxException e) {
-						throw new BusinessServiceException("Failed to update SCA Project Scheduled Rebase.", e);
-					}
-				}
-			}
-			
-			// TO DO
-			// Remove the follow-ng block of code if there is further implementation
-			final Issue.FluentUpdate updateRequest = project.update();
-			boolean fieldUpdates = false;
-			if (fieldUpdates) {
-				updateRequest.execute();
-			}
-		} catch (JiraException e) {
-			throw new BusinessServiceException("Failed to update project.", e);
+		List<Issue> issues = Collections.singletonList(getProjectTicketOrThrow(projectKey));
+		if (issues.size() == 0) {
+			throw new BusinessServiceException ("Failed to recover project: " + projectKey);
 		}
-		
+		Issue project = issues.get(0);
+
+
+		// For some reason, it's not possible to update some custom fields in type of
+		// - Radio button
+		// - Checkbox
+		// - Select List
+		// by using Jira Client. So we have to use REST api to update those fields manually.
+
+		boolean changed = false;
+		JSONObject fieldmap = new JSONObject();
+		final Boolean projectScheduledRebaseDisabled = updatedProject.isProjectScheduledRebaseDisabled();
+		if (projectScheduledRebaseDisabled != null) {
+			String projectScheduledRebaseFieldOldVal =  JiraHelper.toStringOrNull(project.getField(jiraProjectScheduledRebaseField));
+			if ((projectScheduledRebaseFieldOldVal == null && projectScheduledRebaseDisabled != null)
+				|| (projectScheduledRebaseFieldOldVal.equals(ENABLED_TEXT) && projectScheduledRebaseDisabled)
+				|| (projectScheduledRebaseFieldOldVal.equals(DISABLED_TEXT) && !projectScheduledRebaseDisabled)) {
+				JSONObject updateObj = new JSONObject();
+				updateObj.put("value", Boolean.TRUE.equals(projectScheduledRebaseDisabled) ? DISABLED_TEXT : ENABLED_TEXT);
+				fieldmap.put(jiraProjectScheduledRebaseField, updateObj);
+				changed = true;
+			}
+
+		}
+
+		final Boolean taskPromotionDisabled = updatedProject.isTaskPromotionDisabled();
+		if (taskPromotionDisabled != null) {
+			String taskPromotionFieldOldVal = JiraHelper.toStringOrNull(project.getField(jiraTaskPromotionField));
+			if ((taskPromotionFieldOldVal == null && taskPromotionDisabled != null)
+				|| (taskPromotionFieldOldVal.equals(ENABLED_TEXT) && taskPromotionDisabled)
+				|| (taskPromotionFieldOldVal.equals(DISABLED_TEXT) && !taskPromotionDisabled)) {
+				JSONObject updateObj = new JSONObject();
+				updateObj.put("value", Boolean.TRUE.equals(taskPromotionDisabled) ? DISABLED_TEXT : ENABLED_TEXT);
+				fieldmap.put(jiraTaskPromotionField, updateObj);
+				changed = true;
+			}
+		}
+		if (changed) {
+			JSONObject req = new JSONObject();
+			req.put("fields", fieldmap);
+			try {
+				RestClient restclient = getJiraClient().getRestClient();
+				URI uri = new URI(project.getSelf());
+				restclient.put(uri, req);
+			} catch (RestException | IOException | URISyntaxException e) {
+				throw new BusinessServiceException("Failed to update SCA Project Scheduled Rebase.", e);
+			}
+		}
+
 		return retrieveProject(projectKey);
 	}
 
@@ -922,7 +1020,7 @@ public class TaskService {
 		return leadUser;
 	}
 
-	private User getUser(String username) throws BusinessServiceException {
+	public User getUser(String username) throws BusinessServiceException {
 		try {
 			return User.get(getJiraClient().getRestClient(), username);
 		} catch (JiraException je) {
@@ -946,7 +1044,7 @@ public class TaskService {
 			if (changeLog != null) {
 				// Sort changeLog entries descending to get most recent change
 				// first
-				Collections.sort(changeLog.getEntries(), CHANGELOG_ID_COMPARATOR_DESC);
+				changeLog.getEntries().sort(CHANGELOG_ID_COMPARATOR_DESC);
 				for (ChangeLogEntry entry : changeLog.getEntries()) {
 					Date thisChangeDate = entry.getCreated();
 					for (ChangeLogItem changeItem : entry.getItems()) {
@@ -1015,7 +1113,7 @@ public class TaskService {
 
 				if (TaskStatus.COMPLETED.equals(newState)) {
 					try {
-						String conceptsStr = uiService.retrieveTaskPanelStateWithoutThrowingResourceNotFoundException(projectKey, issue.getKey(), issue.getAssignee().getName(), "crs-concepts");
+						String conceptsStr = uiService.retrieveTaskPanelStateWithoutThrowingResourceNotFoundException(projectKey, issue.getKey(), SHARED, "crs-concepts");
 						if (StringUtils.isNotEmpty(conceptsStr)) {
 							properties.put("concepts", conceptsStr);
 						}

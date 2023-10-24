@@ -3,10 +3,10 @@ package org.ihtsdo.authoringservices.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import net.rcarz.jiraclient.Issue;
+import net.rcarz.jiraclient.User;
 import net.sf.json.JSONObject;
-import org.ihtsdo.authoringservices.domain.*;
-import org.ihtsdo.authoringservices.domain.BranchState;
 import org.ihtsdo.authoringservices.domain.Classification;
+import org.ihtsdo.authoringservices.domain.*;
 import org.ihtsdo.authoringservices.service.client.ContentRequestServiceClient;
 import org.ihtsdo.authoringservices.service.client.ContentRequestServiceClientFactory;
 import org.ihtsdo.otf.rest.client.RestClientException;
@@ -34,7 +34,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 @Service
 public class PromotionService {
@@ -118,6 +117,11 @@ public class PromotionService {
 	}
 
 	public void doTaskPromotion(String projectKey, String taskKey, MergeRequest mergeRequest) throws BusinessServiceException {
+		AuthoringProject project = taskService.retrieveProject(projectKey, true);
+		if (Boolean.TRUE.equals(project.isTaskPromotionDisabled())) {
+			throw new BusinessServiceException("Task promotion is disabled");
+		}
+
 		String taskBranchPath = taskService.getTaskBranchPathUsingCache(projectKey, taskKey);
 		final Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 		ProcessStatus taskProcessStatus = new ProcessStatus();
@@ -136,6 +140,12 @@ public class PromotionService {
 					taskProcessStatus.setStatus("Promotion Complete");
 					taskProcessStatus.setMessage("Task successfully promoted");
 					taskPromotionStatus.put(parseKey(projectKey, taskKey), taskProcessStatus);
+
+					User user = taskService.getUser(SecurityUtil.getUsername());
+					releaseNoteService.promoteTaskLineItems(taskService.getTaskBranchPathUsingCache(projectKey, taskKey), user);
+
+					// clear Auto Promotion status if the task has been triggered the Automated Promotion
+					automateTaskPromotionStatus.remove(parseKey(projectKey, taskKey));
 				} else if (merge.getStatus().equals(Merge.Status.CONFLICTS)) {
 					try {
 						ObjectMapper mapper = new ObjectMapper();
@@ -162,7 +172,11 @@ public class PromotionService {
 		});
 	}
 
-	public void doProjectPromotion(String projectKey, MergeRequest mergeRequest) {
+	public void doProjectPromotion(String projectKey, MergeRequest mergeRequest) throws BusinessServiceException {
+		AuthoringProject project = taskService.retrieveProject(projectKey, true);
+		if (Boolean.TRUE.equals(project.isProjectPromotionDisabled()) || Boolean.TRUE.equals(project.isProjectLocked())) {
+			throw new BusinessServiceException("Project promotion is disabled");
+		}
 		final Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 		ProcessStatus projectProcessStatus = new ProcessStatus();
 		executorService.submit(() -> {
@@ -182,6 +196,8 @@ public class PromotionService {
 					projectProcessStatus.setStatus("Promotion Complete");
 					projectProcessStatus.setMessage("Project successfully promoted");
 					projectPromotionStatus.put(projectKey, projectProcessStatus);
+
+					releaseNoteService.promoteProjectLineItems(projectBranchPath);
 				} else if (merge.getStatus().equals(Merge.Status.CONFLICTS)) {
 					try {
 						ObjectMapper mapper = new ObjectMapper();
@@ -212,6 +228,13 @@ public class PromotionService {
 	private synchronized void doAutomateTaskPromotion(String projectKey, String taskKey, Authentication authentication){
 		SecurityContextHolder.getContext().setAuthentication(authentication);
 		try {
+			AuthoringProject project = taskService.retrieveProject(projectKey, true);
+			if (Boolean.TRUE.equals(project.isTaskPromotionDisabled())) {
+				ProcessStatus status = new ProcessStatus("Failed", "Task promotion is disabled");
+				automateTaskPromotionStatus.put(parseKey(projectKey, taskKey), status);
+				logger.error("Task promotion is disabled");
+				return;
+			}
 
 			// Call rebase process
 			String rebaseStatus = this.autoRebaseTask(projectKey, taskKey);
@@ -232,7 +255,9 @@ public class PromotionService {
 					ProcessStatus status = new ProcessStatus("Completed","");
 					automateTaskPromotionStatus.put(parseKey(projectKey, taskKey), status);
 					taskService.stateTransition(projectKey, taskKey, TaskStatus.PROMOTED);
-					releaseNoteService.promoteBranchLineItems(taskService.getTaskBranchPathUsingCache(projectKey, taskKey));
+
+					User user = taskService.getUser(SecurityUtil.getUsername());
+					releaseNoteService.promoteTaskLineItems(taskService.getTaskBranchPathUsingCache(projectKey, taskKey), user);
 				} else {
 					ProcessStatus status = new ProcessStatus("Failed",merge.getApiError() == null ? "" : merge.getApiError().getMessage());
 					automateTaskPromotionStatus.put(parseKey(projectKey, taskKey), status);

@@ -1,6 +1,5 @@
 package org.ihtsdo.authoringservices.service;
 
-import com.google.common.io.Files;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang.StringUtils;
 import org.ihtsdo.authoringservices.domain.EntityType;
@@ -30,6 +29,7 @@ import org.springframework.web.client.RestTemplate;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.file.Files;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
@@ -96,16 +96,16 @@ public class ValidationRunner implements Runnable {
                 throw new BadRequestException("Validation configuration is not set correctly:" + errorMsg);
             }
             //check and update export effective time
-            String exportEffectiveTime = resolveExportEffectiveTime(config);
+            String effectiveTime = resolveEffectiveTime(config);
 
             // Export RF2 delta
             final Branch branch = snowstormRestClient.getBranch(branchPath);
-            exportArchive = snowstormRestClient.export(branchPath, exportEffectiveTime, null, UNPUBLISHED, DELTA);
+            exportArchive = snowstormRestClient.export(branchPath, effectiveTime, null, UNPUBLISHED, DELTA);
             config.setContentHeadTimestamp(branch.getHeadTimestamp());
             config.setContentBaseTimestamp(branch.getBaseTimestamp());
 
             // send delta export directly for RVF validation
-            validateByRvfDirectly(exportArchive);
+            validateByRvfDirectly(exportArchive, effectiveTime);
         } catch (Exception e) {
             Map<String, String> newPropertyValues = new HashMap<>();
             newPropertyValues.put(ValidationService.VALIDATION_STATUS, ValidationJobStatus.FAILED.name());
@@ -127,7 +127,7 @@ public class ValidationRunner implements Runnable {
         }
     }
 
-    private String resolveExportEffectiveTime(ValidationConfiguration config) throws ParseException {
+    private String resolveEffectiveTime(ValidationConfiguration config) throws ParseException {
         String exportEffectiveDate = config.getReleaseDate();
         String mostRecentRelease = null;
         if (config.getDependencyRelease() != null) {
@@ -150,39 +150,44 @@ public class ValidationRunner implements Runnable {
         return exportEffectiveDate;
     }
 
-    public void validateByRvfDirectly(File exportArchive) throws ServiceException {
-        File tempDir = Files.createTempDir();
-        File localZipFile = new File(tempDir, config.getProductName() + "_" + config.getReleaseDate() + ".zip");
+    public void validateByRvfDirectly(File exportArchive, String effectiveTime) throws ServiceException {
+        File tempDir = null;
+        File localZipFile = null;
         try {
+            tempDir = Files.createTempDirectory("rvf-temp").toFile();
+            localZipFile = new File(tempDir, config.getProductName() + "_" + effectiveTime + ".zip");
             // prepare files for validation
-            prepareExportFilesForValidation(exportArchive, config, localZipFile);
+            prepareExportFilesForValidation(exportArchive, config, localZipFile, effectiveTime);
 
             // call validation API
-            runValidationForRF2DeltaExport(localZipFile, config);
+            runValidationForRF2DeltaExport(localZipFile, config, effectiveTime);
         } catch (IOException | ProcessWorkflowException e) {
 			throw new ServiceException("Validation failed.", e);
 		} finally {
-			localZipFile.deleteOnExit();
-			tempDir.deleteOnExit();
-            if (exportArchive != null) {
-                exportArchive.deleteOnExit();
+            if (localZipFile != null) {
+                FileUtils.deleteQuietly(localZipFile);
+            }
+            if (tempDir != null) {
+                // Better to delete temp files after use rather than deleteOnExit()
+                FileUtils.deleteQuietly(tempDir);
             }
         }
     }
 
-    public void prepareExportFilesForValidation(File exportArchive, ValidationConfiguration config, File localZipFile) throws ProcessWorkflowException, IOException {
+    public void prepareExportFilesForValidation(File exportArchive, ValidationConfiguration config, File localZipFile, String effectiveTime) throws ProcessWorkflowException, IOException {
         File extractDir = null;
         try {
-            extractDir = srsDAO.extractAndConvertExportWithRF2FileNameFormat(exportArchive, config.getReleaseCenter(), config.getReleaseDate());
+            extractDir = srsDAO.extractAndConvertExportWithRF2FileNameFormat(exportArchive, config.getReleaseCenter(), effectiveTime);
             ZipFileUtils.zip(extractDir.getAbsolutePath(), localZipFile.getAbsolutePath());
         } finally {
             if (extractDir != null) {
-                extractDir.deleteOnExit();
+                // Better to delete temp files after use rather than deleteOnExit()
+                FileUtils.deleteDirectory(extractDir);
             }
         }
     }
 
-    public void runValidationForRF2DeltaExport(File zipFile, ValidationConfiguration config) throws IOException, ServiceException {
+    public void runValidationForRF2DeltaExport(File zipFile, ValidationConfiguration config, String effectiveTime) throws IOException, ServiceException {
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
 
         MultiValueMap<String, String> fileMap = new LinkedMultiValueMap<>();
@@ -210,8 +215,11 @@ public class ValidationRunner implements Runnable {
             body.add("enableDrools", Boolean.TRUE.toString());
             body.add("droolsRulesGroups", config.getAssertionGroupNames());
         }
-        if (StringUtils.isNotBlank(config.getReleaseDate())) {
-            body.add("effectiveTime", config.getReleaseDate());
+        if (StringUtils.isNotBlank(effectiveTime)) {
+            body.add("effectiveTime", effectiveTime);
+        }
+        if (StringUtils.isNotBlank(config.getDefaultModuleId())) {
+            body.add("defaultModuleId", config.getDefaultModuleId());
         }
         if (StringUtils.isNotBlank(config.getIncludedModuleIds())) {
             body.add("includedModules", config.getIncludedModuleIds());

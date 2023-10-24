@@ -1,10 +1,10 @@
 package org.ihtsdo.authoringservices.rest;
 
 import io.kaicode.rest.util.branchpathrewrite.BranchPathUriUtil;
-import io.swagger.annotations.Api;
-import io.swagger.annotations.ApiOperation;
-import io.swagger.annotations.ApiResponse;
-import io.swagger.annotations.ApiResponses;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import org.apache.http.entity.ContentType;
 import org.ihtsdo.otf.rest.exception.BusinessServiceException;
 import org.ihtsdo.authoringservices.service.loinc.LOINCReferenceSetExportService;
@@ -17,7 +17,7 @@ import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
-@Api("Export LOINC Reference Set")
+@Tag(name = "Export LOINC Reference Set")
 @RestController
 @RequestMapping
 public class LOINCExportController {
@@ -28,20 +28,20 @@ public class LOINCExportController {
 	@Autowired
 	private LOINCReferenceSetExportService exportService;
 
-	@ApiOperation(value="Export LOINC Reference Set RF2 Delta without UUIDs")
+	@Operation(summary = "Export LOINC Reference Set RF2 Delta without UUIDs")
 	@ApiResponses({
-			@ApiResponse(code = 200, message = "OK")
+			@ApiResponse(responseCode = "200", description = "OK")
 	})
 	@RequestMapping(value="/loinc-export/{branchPath}", method=RequestMethod.GET, produces="text/tab-separated-values")
 	public void exportLOINCReferenceSetWithoutUuids(@PathVariable String branchPath, HttpServletResponse response) throws BusinessServiceException, IOException {
 		response.setContentType(TSV_CONTENT_TYPE.toString());
 		setResponseFilename(response);
-		exportService.exportDelta(BranchPathUriUtil.parseBranchPath(branchPath), null, response.getOutputStream());
+		exportService.exportDelta(BranchPathUriUtil.decodePath(branchPath), null, response.getOutputStream());
 	}
 
-	@ApiOperation(value="Export LOINC Reference Set RF2 Delta with UUIDs")
+	@Operation(summary = "Export LOINC Reference Set RF2 Delta with UUIDs")
 	@ApiResponses({
-			@ApiResponse(code = 200, message = "OK")
+			@ApiResponse(responseCode = "200", description = "OK")
 	})
 	@RequestMapping(value="/loinc-export/{branchPath}", method=RequestMethod.POST, consumes = "multipart/form-data", produces="text/tab-separated-values")
 	public void exportLOINCReferenceSetWithUuids(@PathVariable String branchPath,
@@ -49,7 +49,7 @@ public class LOINCExportController {
 												 HttpServletResponse response) throws BusinessServiceException, IOException {
 		response.setContentType(TSV_CONTENT_TYPE.toString());
 		setResponseFilename(response);
-		exportService.exportDelta(BranchPathUriUtil.parseBranchPath(branchPath), previousLoincRF2SnapshotFile.getInputStream(), response.getOutputStream());
+		exportService.exportDelta(BranchPathUriUtil.decodePath(branchPath), previousLoincRF2SnapshotFile.getInputStream(), response.getOutputStream());
 	}
 
 	private void setResponseFilename(HttpServletResponse response) {

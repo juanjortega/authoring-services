@@ -42,12 +42,9 @@ public class ReleaseNoteClient {
                 .build();
 
         //Add a ClientHttpRequestInterceptor to the RestTemplate to add cookies as required
-        restTemplate.getInterceptors().add(new ClientHttpRequestInterceptor(){
-            @Override
-            public ClientHttpResponse intercept(HttpRequest request, byte[] body, ClientHttpRequestExecution execution) throws IOException {
-                request.getHeaders().addAll(headers);
-                return execution.execute(request, body);
-            }
+        restTemplate.getInterceptors().add((request, body, execution) -> {
+            request.getHeaders().addAll(headers);
+            return execution.execute(request, body);
         });
     }
 
@@ -71,6 +68,26 @@ public class ReleaseNoteClient {
             restTemplate.postForObject(this.releaseNoteServiceUrl + branchPath + "/lineitems/" + lineItemId + "/promote", null, Void.class);
         } catch (HttpClientErrorException | HttpServerErrorException e) {
             String errorMessage = String.format("Failed to promote line item id= %s for branch %s. Error message: %s", lineItemId, branchPath, e.getMessage());
+            logger.error(errorMessage);
+            throw new RestClientException(errorMessage);
+        }
+    }
+
+    public void promoteAllLineItems(String branchPath)  throws RestClientException {
+        try {
+            restTemplate.postForObject(this.releaseNoteServiceUrl + branchPath + "/lineitems/promote", null, Void.class);
+        } catch (HttpClientErrorException | HttpServerErrorException e) {
+            String errorMessage = String.format("Failed to promote all line items for branch %s. Error message: %s", branchPath, e.getMessage());
+            logger.error(errorMessage);
+            throw new RestClientException(errorMessage);
+        }
+    }
+
+    public void updateLineItem(String branchPath, LineItem lineItem) throws RestClientException {
+        try {
+            restTemplate.put(this.releaseNoteServiceUrl + branchPath + "/lineitems/" + lineItem.getId(), lineItem, Void.class);
+        } catch (HttpClientErrorException | HttpServerErrorException e) {
+            String errorMessage = String.format("Failed to update line item id= %s for branch %s. Error message: %s", lineItem.getId(), branchPath, e.getMessage());
             logger.error(errorMessage);
             throw new RestClientException(errorMessage);
         }
